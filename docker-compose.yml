@@ -1,0 +1,43 @@
+networks:
+  default:
+    external: true
+    name: tim-net
+
+services:
+  intramo417-data-collector:
+    image: ${CR_PROVIDER}/${CR_REGISTRY}/${APP_NAME}:${TAG-latest}
+    container_name: ${APP_NAME}
+    hostname: ${APP_NAME}
+    restart: unless-stopped
+    networks:
+      - default
+    dns:
+      - 10.128.0.2 # subnet a
+      - 10.129.0.2 # subnet b
+      - 10.131.0.2 # subnet d
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL-info}
+      TZ: ${TZ-Europe/Moscow}
+      PIPELINES: ${PIPELINES}
+      TABLES: ${TABLES}
+      LISTS: ${LISTS}
+      API_BASE_URL: ${API_BASE_URL}
+      API_TOKEN: ${API_TOKEN}
+      PG_DB_HOST: ${PG_DB_HOST}
+      PG_DB_PORT: ${PG_DB_PORT-5432}
+      PG_DB_USER: ${PG_DB_USER}
+      PG_DB_PASS: ${PG_DB_PASS}
+      PG_DB_NAME: ${PG_DB_NAME}
+    labels:
+      - 'vector.enable=true'
+    logging:
+      driver: 'json-file'
+      options:
+        max-size: '10m'
+        max-file: '3'
+        compress: 'true'
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: '256Mb'

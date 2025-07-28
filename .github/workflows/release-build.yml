@@ -1,0 +1,128 @@
+name: Release and Build
+on:
+  push:
+    branches:
+      - main
+      - master
+
+  workflow_dispatch:
+
+env:
+  APP_NAME: ${{ github.event.repository.name }}
+  IMAGE_NAME: '${{ vars.CR_PROVIDER }}/${{ secrets.CR_REGISTRY }}/${{ github.event.repository.name }}'
+  TAG: ${{ github.ref_name }}
+  GITHUB_SHA: ${{ github.sha }}
+  YC_MAIN_FOLDER_ID: ${{ secrets.YC_MAIN_FOLDER_ID }}
+  YC_MAIN_CLOUD_ID: ${{ secrets.YC_MAIN_CLOUD_ID }}
+  YC_CONTAINER_NAME: ${{ github.event.repository.name }}
+
+jobs:
+  build_and_push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4.2.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+       # Add extra files from secrets
+      - name: Create extra files
+        run: |
+          mkdir -p keys
+          echo "${{ secrets.GSS_SA_CREDS_BASE64 }}" > keys/credentials.b64
+          echo "${{ secrets.YC_CA_CERT }}" > keys/root.crt
+          ls -la
+
+      # Get tags
+      - name: Get tags
+        id: get_tags
+        run: |
+          echo "Before tag: $TAG"
+          export TAG=$(git describe --no-abbrev --always --tags $GITHUB_SHA)
+          echo "New tag: $TAG"
+          echo "TAG=${TAG}" >> $GITHUB_ENV
+
+      # Runs a single command using the runners shell
+      - name: Yandex Cloud CR "Login" Action for GitHub Actions
+        uses: yc-actions/yc-cr-login@v2.0.0
+        with:
+          yc-sa-json-credentials: ${{ secrets.YC_SA_CR_IMAGES_PUSHER }}
+
+      # Build image and push it to container registry
+      - name: Build, tag, and push image to Yandex Cloud Container Registry
+        run: |
+          docker buildx build --pull --push \
+            --build-arg GITHUB_SHA \
+            --build-arg APP_NAME \
+            --build-arg TAG \
+            -t $IMAGE_NAME:$TAG \
+            -t $IMAGE_NAME:latest \
+            -t $IMAGE_NAME:$GITHUB_SHA \
+            .
+
+      - name: Install Yandex CLI
+        run: |
+          curl https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
+          echo "$HOME/yandex-cloud/bin" >> $GITHUB_PATH
+
+      - name: Set Yandex CLI Config
+        run: |
+          yc --version
+          echo '${{ secrets.YC_SA_CR_IMAGES_PUSHER }}' > key.json
+          yc config set service-account-key key.json
+          yc config set cloud-id $YC_MAIN_CLOUD_ID
+          yc config set folder-id $YC_MAIN_FOLDER_ID
+
+      - name: Extract service_account_id from key
+        id: extract_sa
+        run: |
+          echo "SA_ID=$(jq -r '.service_account_id' key.json)" >> $GITHUB_ENV
+
+      - name: Create container if not exists
+        run: |
+          echo $YC_CONTAINER_NAME
+          if ! yc serverless container get $YC_CONTAINER_NAME > /dev/null 2>&1; then
+            echo "Container not found, creating..."
+            yc serverless container create --name $YC_CONTAINER_NAME
+          else
+            echo "Container already exists"
+          fi
+
+      # Deploy Serverless Container
+      - name: Deploy to Yandex Cloud Serverless Container
+        run: |
+          yc serverless container revision deploy \
+          --container-name $YC_CONTAINER_NAME \
+          --image $IMAGE_NAME:$TAG \
+          --service-account-id $SA_ID \
+          --environment LOG_LEVEL=${{ vars.LOG_LEVEL }} \
+          --environment TZ=${{ vars.TZ }} \
+          --environment PIPELINES=${{ vars.PIPELINES }} \
+          --environment TABLES=${{ vars.TABLES }} \
+          --environment LISTS=${{ vars.LISTS }} \
+          --environment API_BASE_URL=${{ secrets.API_BASE_URL }} \
+          --environment API_TOKEN=${{ secrets.API_TOKEN }} \
+          --environment PG_DB_HOST=${{ secrets.PG_DB_HOST }} \
+          --environment PG_DB_PORT=${{ secrets.PG_DB_PORT }} \
+          --environment PG_DB_USER=${{ secrets.PG_DB_USER }} \
+          --environment PG_DB_PASS=${{ secrets.PG_DB_PASS }} \
+          --environment PG_DB_NAME=${{ secrets.PG_DB_NAME }} \
+          --environment PG_DB_CERT=${{ secrets.PG_DB_CERT }} \
+          --network-id ${{ secrets.NETWORK_DEFAULT_ID }} \
+          --subnets ${{ secrets.SUBNET_IDS }} \
+          --memory 512M \
+          --cores 1 \
+          --execution-timeout 10m \
+          --concurrency 4
+
+      # Save workflow summary
+      - name: Save summary
+        run: |
+          echo "### Tag: \`${{ env.TAG }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "### SHA: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "### Image: \`${{ env.IMAGE_NAME }}:$TAG\`" >> $GITHUB_STEP_SUMMARY
+          echo "https://${{ env.YC_CONTAINER_NAME }}.containers.yandexcloud.net" >> $GITHUB_STEP_SUMMARY
+      
